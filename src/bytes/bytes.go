@@ -12,23 +12,12 @@ import (
 	"unicode/utf8"
 )
 
-// Equal returns a boolean reporting whether a and b
+// Equal reports whether a and b
 // are the same length and contain the same bytes.
 // A nil argument is equivalent to an empty slice.
 func Equal(a, b []byte) bool {
-	return bytealg.Equal(a, b)
-}
-
-func equalPortable(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i, c := range a {
-		if c != b[i] {
-			return false
-		}
-	}
-	return true
+	// Neither cmd/compile nor gccgo allocates for these string conversions.
+	return string(a) == string(b)
 }
 
 // Compare returns an integer comparing two byte slices lexicographically.
@@ -601,6 +590,35 @@ func ToLowerSpecial(c unicode.SpecialCase, s []byte) []byte {
 // title case, giving priority to the special casing rules.
 func ToTitleSpecial(c unicode.SpecialCase, s []byte) []byte {
 	return Map(c.ToTitle, s)
+}
+
+// ToValidUTF8 treats s as UTF-8-encoded bytes and returns a copy with each run of bytes
+// representing invalid UTF-8 replaced with the bytes in replacement, which may be empty.
+func ToValidUTF8(s, replacement []byte) []byte {
+	b := make([]byte, 0, len(s)+len(replacement))
+	invalid := false // previous byte was from an invalid UTF-8 sequence
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			i++
+			invalid = false
+			b = append(b, byte(c))
+			continue
+		}
+		_, wid := utf8.DecodeRune(s[i:])
+		if wid == 1 {
+			i++
+			if !invalid {
+				invalid = true
+				b = append(b, replacement...)
+			}
+			continue
+		}
+		invalid = false
+		b = append(b, s[i:i+wid]...)
+		i += wid
+	}
+	return b
 }
 
 // isSeparator reports whether the rune could mark a word boundary.

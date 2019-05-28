@@ -151,10 +151,18 @@
 // 		install and load all packages from dir instead of the usual locations.
 // 		For example, when building with a non-standard configuration,
 // 		use -pkgdir to keep generated packages in a separate location.
-// 	-tags 'tag list'
-// 		a space-separated list of build tags to consider satisfied during the
+// 	-tags tag,list
+// 		a comma-separated list of build tags to consider satisfied during the
 // 		build. For more information about build tags, see the description of
 // 		build constraints in the documentation for the go/build package.
+// 		(Earlier versions of Go used a space-separated list, and that form
+// 		is deprecated but still recognized.)
+// 	-trimpath
+// 		remove all file system paths from the resulting executable.
+// 		Instead of absolute file system paths, the recorded file names
+// 		will begin with either "go" (for the standard library),
+// 		or a module path@version (when using modules),
+// 		or a plain import path (when using GOPATH).
 // 	-toolexec 'cmd args'
 // 		a program to use to invoke toolchain programs like vet and asm.
 // 		For example, instead of running asm, the go command will run
@@ -368,7 +376,7 @@
 //
 // Usage:
 //
-// 	go env [-json] [var ...]
+// 	go env [-json] [-u] [-w] [var ...]
 //
 // Env prints Go environment information.
 //
@@ -379,6 +387,14 @@
 //
 // The -json flag prints the environment in JSON format
 // instead of as a shell script.
+//
+// The -u flag requires one or more arguments and unsets
+// the default setting for the named environment variables,
+// if one has been set with 'go env -w'.
+//
+// The -w flag requires one or more arguments of the
+// form NAME=VALUE and changes the default settings
+// of the named environment variables to the given values.
 //
 // For more about environment variables, see 'go help environment'.
 //
@@ -509,7 +525,9 @@
 // they are treated as a single package. Within a package, generate processes the
 // source files in a package in file name order, one at a time. Within
 // a source file, generate runs generators in the order they appear
-// in the file, one at a time.
+// in the file, one at a time. The go generate tool also sets the build
+// tag "generate" so that files may be examined by go generate but ignored
+// during build.
 //
 // If any generator returns an error exit status, "go generate" skips
 // all further processing for that package.
@@ -539,7 +557,7 @@
 //
 // Usage:
 //
-// 	go get [-d] [-m] [-u] [-v] [-insecure] [build flags] [packages]
+// 	go get [-d] [-m] [-t] [-u] [-v] [-insecure] [build flags] [packages]
 //
 // Get resolves and adds dependencies to the current development module
 // and then builds and installs them.
@@ -549,7 +567,7 @@
 // For each named package or package pattern, get must decide which version of
 // the corresponding module to use. By default, get chooses the latest tagged
 // release version, such as v0.4.5 or v1.2.3. If there are no tagged release
-// versions, get chooses the latest tagged prerelease version, such as
+// versions, get chooses the latest tagged pre-release version, such as
 // v0.0.1-pre1. If there are no tagged versions at all, get chooses the latest
 // known commit.
 //
@@ -582,6 +600,9 @@
 // are competing requirements for a particular module, then 'go get' resolves
 // those requirements by taking the maximum requested version.)
 //
+// The -t flag instructs get to consider modules needed to build tests of
+// packages specified on the command line.
+//
 // The -u flag instructs get to update dependencies to use newer minor or
 // patch releases when available. Continuing the previous example,
 // 'go get -u A' will use the latest A with B v1.3.1 (not B v1.2.3).
@@ -591,6 +612,9 @@
 // Continuing the previous example,
 // 'go get -u=patch A@latest' will use the latest A with B v1.2.4 (not B v1.2.3),
 // while 'go get -u=patch A' will use a patch release of A instead.
+//
+// When the -t and -u flags are used together, get will update
+// test dependencies as well.
 //
 // In general, adding a new dependency may require upgrading
 // existing dependencies to keep a working build, and 'go get' does
@@ -602,6 +626,13 @@
 // and downgrading modules and updating go.mod. When using -m,
 // each specified package path must be a module path as well,
 // not the import path of a package below the module root.
+//
+// When the -m and -u flags are used together, 'go get' will upgrade
+// modules that provide packages depended on by the modules named on
+// the command line. For example, 'go get -u -m A' will upgrade A and
+// any module providing packages imported by packages in A.
+// 'go get -u -m' will upgrade modules that provided packages needed
+// by the main module.
 //
 // The -insecure flag permits fetching from repositories and resolving
 // custom domains using insecure schemes such as HTTP. Use with caution.
@@ -624,12 +655,11 @@
 // the named packages, including downloading necessary dependencies,
 // but not to build and install them.
 //
-// With no package arguments, 'go get' applies to the main module,
-// and to the Go package in the current directory, if any. In particular,
-// 'go get -u' and 'go get -u=patch' update all the dependencies of the
-// main module. With no package arguments and also without -u,
-// 'go get' is not much more than 'go install', and 'go get -d' not much
-// more than 'go list'.
+// With no package arguments, 'go get' applies to Go package in the
+// current directory, if any. In particular, 'go get -u' and
+// 'go get -u=patch' update all the dependencies of that package.
+// With no package arguments and also without -u, 'go get' is not much more
+// than 'go install', and 'go get -d' not much more than 'go list'.
 //
 // For more about modules, see 'go help modules'.
 //
@@ -1261,7 +1291,10 @@
 // line. If a package test fails, go test prints the full test output.
 // If invoked with the -bench or -v flag, go test prints the full
 // output even for passing package tests, in order to display the
-// requested benchmark results or verbose logging.
+// requested benchmark results or verbose logging. After the package
+// tests for all of the listed packages finish, and their output is
+// printed, go test prints a final 'FAIL' status if any package test
+// has failed.
 //
 // In package list mode only, go test caches successful package test
 // results to avoid unnecessary repeated running of tests. When the
@@ -1341,9 +1374,27 @@
 //
 // Usage:
 //
-// 	go version
+// 	go version [-m] [-v] [file ...]
 //
-// Version prints the Go version, as reported by runtime.Version.
+// Version prints the build information for Go executables.
+//
+// Go version reports the Go version used to build each of the named
+// executable files.
+//
+// If no files are named on the command line, go version prints its own
+// version information.
+//
+// If a directory is named, go version walks that directory, recursively,
+// looking for recognized Go binaries and reporting their versions.
+// By default, go version does not report unrecognized files found
+// during a directory scan. The -v flag causes it to report unrecognized files.
+//
+// The -m flag causes go version to print each executable's embedded
+// module version information, when available. In the output, the module
+// information consists of multiple lines following the version line, each
+// indented by a leading tab character.
+//
+// See also: go doc runtime/debug.BuildInfo.
 //
 //
 // Report likely mistakes in packages
@@ -1485,10 +1536,17 @@
 //
 // Environment variables
 //
-// The go command, and the tools it invokes, examine a few different
-// environment variables. For many of these, you can see the default
-// value of on your system by running 'go env NAME', where NAME is the
-// name of the variable.
+// The go command and the tools it invokes consult environment variables
+// for configuration. If an environment variable is unset, the go command
+// uses a sensible default setting. To see the effective setting of the
+// variable <NAME>, run 'go env <NAME>'. To change the default setting,
+// run 'go env -w <NAME>=<VALUE>'. Defaults changed using 'go env -w'
+// are recorded in a Go environment configuration file stored in the
+// per-user configuration directory, as reported by os.UserConfigDir.
+// The location of the configuration file can be changed by setting
+// the environment variable GOENV, and 'go env GOENV' prints the
+// effective location, but 'go env -w' cannot change the default location.
+// See 'go help env' for details.
 //
 // General-purpose environment variables:
 //
@@ -1502,10 +1560,15 @@
 // 	GOCACHE
 // 		The directory where the go command will store cached
 // 		information for reuse in future builds.
+// 	GOENV
+// 		The location of the Go environment configuration file.
+// 		Cannot be set using 'go env -w'.
 // 	GOFLAGS
 // 		A space-separated list of -flag=value settings to apply
 // 		to go commands by default, when the given flag is known by
-// 		the current command. Flags listed on the command line
+// 		the current command. Each entry must be a standalone flag.
+// 		Because the entries are space-separated, flag values must
+// 		not contain spaces. Flags listed on the command line
 // 		are applied after this list and therefore override it.
 // 	GOOS
 // 		The operating system for which to compile code.
@@ -1514,21 +1577,18 @@
 // 		For more details see: 'go help gopath'.
 // 	GOPROXY
 // 		URL of Go module proxy. See 'go help goproxy'.
-// 	GORACE
-// 		Options for the race detector.
-// 		See https://golang.org/doc/articles/race_detector.html.
 // 	GOROOT
 // 		The root of the go tree.
 // 	GOTMPDIR
 // 		The directory where the go command will write
 // 		temporary source files, packages, and binaries.
 //
-// Each entry in the GOFLAGS list must be a standalone flag.
-// Because the entries are space-separated, flag values must
-// not contain spaces.
-//
 // Environment variables for use with cgo:
 //
+// 	AR
+// 		The command to use to manipulate library archives when
+// 		building with the gccgo compiler.
+// 		The default is 'ar'.
 // 	CC
 // 		The command to use to compile C code.
 // 	CGO_ENABLED
@@ -1558,12 +1618,10 @@
 // 		but for the linker.
 // 	CXX
 // 		The command to use to compile C++ code.
+// 	FC
+// 		The command to use to compile Fortran code.
 // 	PKG_CONFIG
 // 		Path to pkg-config tool.
-// 	AR
-// 		The command to use to manipulate library archives when
-// 		building with the gccgo compiler.
-// 		The default is 'ar'.
 //
 // Architecture-specific environment variables:
 //
@@ -1598,9 +1656,11 @@
 // 		when using -linkmode=auto with code that uses cgo.
 // 		Set to 0 to disable external linking mode, 1 to enable it.
 // 	GIT_ALLOW_PROTOCOL
-// 		Defined by Git. A colon-separated list of schemes that are allowed to be used
-// 		with git fetch/clone. If set, any scheme not explicitly mentioned will be
-// 		considered insecure by 'go get'.
+// 		Defined by Git. A colon-separated list of schemes that are allowed
+// 		to be used with git fetch/clone. If set, any scheme not explicitly
+// 		mentioned will be considered insecure by 'go get'.
+// 		Because the variable is defined by Git, the default value cannot
+// 		be set using 'go env -w'.
 //
 // Additional information available from 'go env' but not read from the environment:
 //
@@ -1959,16 +2019,6 @@
 //
 //
 // Module proxy protocol
-//
-// The go command by default downloads modules from version control systems
-// directly, just as 'go get' always has. The GOPROXY environment variable allows
-// further control over the download source. If GOPROXY is unset, is the empty string,
-// or is the string "direct", downloads use the default direct connection to version
-// control systems. Setting GOPROXY to "off" disallows downloading modules from
-// any source. Otherwise, GOPROXY is expected to be the URL of a module proxy,
-// in which case the go command will fetch all modules from that proxy.
-// No matter the source of the modules, downloaded modules must match existing
-// entries in go.sum (see 'go help modules' for discussion of verification).
 //
 // A Go module proxy is any web server that can respond to GET requests for
 // URLs of a specified form. The requests have no query parameters, so even
@@ -2526,16 +2576,43 @@
 //
 // Module downloading and verification
 //
-// The go command checks downloads against known checksums,
-// to detect unexpected changes in the content of any specific module
-// version from one day to the next. See 'go help module-auth' for details.
+// The go command can fetch modules from a proxy or connect to source control
+// servers directly, according to the setting of the GOPROXY environment
+// variable (see 'go help env'). The default setting for GOPROXY is
+// "https://proxy.golang.org", the Go module mirror run by Google.
+// See https://proxy.golang.org/privacy for the service's privacy policy.
+// If GOPROXY is set to the string "direct", downloads use a direct connection
+// to source control servers. Setting GOPROXY to "off" disallows downloading
+// modules from any source. Otherwise, GOPROXY is expected to be a comma-separated
+// list of the URLs of module proxies, in which case the go command will fetch
+// modules from those proxies. For each request, the go command tries each proxy
+// in sequence, only moving to the next if the current proxy returns a 404 or 410
+// HTTP response. The string "direct" may appear in the proxy list,
+// to cause a direct connection to be attempted at that point in the search.
+// Any proxies listed after "direct" are never consulted.
 //
-// The go command can fetch modules from a proxy instead of connecting
-// to source control systems directly, according to the setting of the GOPROXY
-// environment variable.
+// The GONOPROXY environment variable is a comma-separated list of
+// glob patterns (in the syntax of Go's path.Match) of module path prefixes
+// that should always be fetched directly, ignoring the GOPROXY setting.
+// For example,
 //
-// See 'go help goproxy' for details about the proxy and also the format of
-// the cached downloaded packages.
+// 	GONOPROXY=*.corp.example.com,rsc.io/private
+//
+// forces a direct connection to download modules with path prefixes matching
+// either pattern, including "git.corp.example.com/xyzzy", "rsc.io/private",
+// and "rsc.io/private/quux".
+//
+// The 'go env -w' command (see 'go help env') can be used to set these variables
+// for future go command invocations.
+//
+// No matter the source of the modules, the go command checks downloads against
+// known checksums, to detect unexpected changes in the content of any specific
+// module version from one day to the next. This check first consults the current
+// module's go.sum file but falls back to the Go checksum database.
+// See 'go help module-auth' for details.
+//
+// See 'go help goproxy' for details about the proxy protocol and also
+// the format of the cached downloaded packages.
 //
 // Modules and vendoring
 //
@@ -2694,32 +2771,47 @@
 // you want to use the same code you used yesterday.
 //
 // If a downloaded module is not yet included in go.sum and it is a publicly
-// available module, the go command consults the Go notary server to fetch
+// available module, the go command consults the Go checksum database to fetch
 // the expected go.sum lines. If the downloaded code does not match those
 // lines, the go command reports the mismatch and exits. Note that the
-// notary is not consulted for module versions already listed in go.sum.
+// database is not consulted for module versions already listed in go.sum.
 //
-// The GONOVERIFY environment variable is a comma-separated list of
-// patterns (in the syntax of Go's path.Match) of module path prefixes
-// that should not be verified using the notary. For example,
+// If a go.sum mismatch is reported, it is always worth investigating why
+// the code downloaded today differs from what was downloaded yesterday.
 //
-// 	GONOVERIFY=*.corp.example.com,rsc.io/private
+// The GOSUMDB environment variable identifies the name of checksum database
+// to use and optionally its public key and URL, as in:
 //
-// disables notary verification for modules with path prefixes matching
+// 	GOSUMDB="sum.golang.org"
+// 	GOSUMDB="sum.golang.org+<publickey>"
+// 	GOSUMDB="sum.golang.org+<publickey> https://sum.golang.org"
+//
+// The go command knows the public key of sum.golang.org; use of any other
+// database requires giving the public key explicitly. The URL defaults to
+// "https://" followed by the database name.
+//
+// GOSUMDB defaults to "sum.golang.org", the Go checksum database run by Google.
+// See https://sum.golang.org/privacy for the service's privacy policy.
+//
+// If GOSUMDB is set to "off", or if "go get" is invoked with the -insecure flag,
+// the checksum database is not consulted, and all unrecognized modules are
+// accepted, at the cost of giving up the security guarantee of verified repeatable
+// downloads for all modules. A better way to bypass the checksum database
+// for specific modules is to use the GONOSUMDB environment variable.
+//
+// The GONOSUMDB environment variable is a comma-separated list of
+// glob patterns (in the syntax of Go's path.Match) of module path prefixes
+// that should not be compared against the checksum database.
+// For example,
+//
+// 	GONOSUMDB=*.corp.example.com,rsc.io/private
+//
+// disables checksum database lookups for modules with path prefixes matching
 // either pattern, including "git.corp.example.com/xyzzy", "rsc.io/private",
 // and "rsc.io/private/quux".
 //
-// As a special case, if GONOVERIFY is set to "off", or if "go get" was invoked
-// with the -insecure flag, the notary is never consulted, but note that this
-// defeats the security provided by the notary. A better course of action is
-// to set a narrower GONOVERIFY and, in the case of go.sum mismatches,
-// investigate why the code downloaded code differs from what was
-// downloaded yesterday.
-//
-// NOTE: Early in the Go 1.13 dev cycle, the notary is being simulated by
-// a whitelist of known hashes for popular Go modules, to expose any
-// problems arising from knowing the expected hashes.
-// TODO(rsc): This note should be removed once the real notary is used instead. See #30601.
+// The 'go env -w' command (see 'go help env') can be used to set these variables
+// for future go command invocations.
 //
 //
 // Testing flags

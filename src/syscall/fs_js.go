@@ -20,6 +20,8 @@ var jsProcess = js.Global().Get("process")
 var jsFS = js.Global().Get("fs")
 var constants = jsFS.Get("constants")
 
+var uint8Array = js.Global().Get("Uint8Array")
+
 var (
 	nodeWRONLY = constants.Get("O_WRONLY").Int()
 	nodeRDWR   = constants.Get("O_RDWR").Int()
@@ -378,12 +380,13 @@ func Read(fd int, b []byte) (int, error) {
 		return n, err
 	}
 
-	a := js.TypedArrayOf(b)
-	n, err := fsCall("read", fd, a, 0, len(b), nil)
-	a.Release()
+	buf := uint8Array.New(len(b))
+	n, err := fsCall("read", fd, buf, 0, len(b), nil)
 	if err != nil {
 		return 0, err
 	}
+	js.CopyBytesToGo(b, buf)
+
 	n2 := n.Int()
 	f.pos += int64(n2)
 	return n2, err
@@ -401,9 +404,9 @@ func Write(fd int, b []byte) (int, error) {
 		return n, err
 	}
 
-	a := js.TypedArrayOf(b)
-	n, err := fsCall("write", fd, a, 0, len(b), nil)
-	a.Release()
+	buf := uint8Array.New(len(b))
+	js.CopyBytesToJS(buf, b)
+	n, err := fsCall("write", fd, buf, 0, len(b), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -413,19 +416,19 @@ func Write(fd int, b []byte) (int, error) {
 }
 
 func Pread(fd int, b []byte, offset int64) (int, error) {
-	a := js.TypedArrayOf(b)
-	n, err := fsCall("read", fd, a, 0, len(b), offset)
-	a.Release()
+	buf := uint8Array.New(len(b))
+	n, err := fsCall("read", fd, buf, 0, len(b), offset)
 	if err != nil {
 		return 0, err
 	}
+	js.CopyBytesToGo(b, buf)
 	return n.Int(), nil
 }
 
 func Pwrite(fd int, b []byte, offset int64) (int, error) {
-	a := js.TypedArrayOf(b)
-	n, err := fsCall("write", fd, a, 0, len(b), offset)
-	a.Release()
+	buf := uint8Array.New(len(b))
+	js.CopyBytesToJS(buf, b)
+	n, err := fsCall("write", fd, buf, 0, len(b), offset)
 	if err != nil {
 		return 0, err
 	}

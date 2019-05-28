@@ -51,15 +51,17 @@ type BinOpTest struct {
 }
 
 func TestEqual(t *testing.T) {
-	for _, tt := range compareTests {
-		eql := Equal(tt.a, tt.b)
-		if eql != (tt.i == 0) {
-			t.Errorf(`Equal(%q, %q) = %v`, tt.a, tt.b, eql)
+	// Run the tests and check for allocation at the same time.
+	allocs := testing.AllocsPerRun(10, func() {
+		for _, tt := range compareTests {
+			eql := Equal(tt.a, tt.b)
+			if eql != (tt.i == 0) {
+				t.Errorf(`Equal(%q, %q) = %v`, tt.a, tt.b, eql)
+			}
 		}
-		eql = EqualPortable(tt.a, tt.b)
-		if eql != (tt.i == 0) {
-			t.Errorf(`EqualPortable(%q, %q) = %v`, tt.a, tt.b, eql)
-		}
+	})
+	if allocs > 0 {
+		t.Errorf("Equal allocated %v times", allocs)
 	}
 }
 
@@ -572,11 +574,6 @@ func BenchmarkEqual(b *testing.B) {
 	benchBytes(b, sizes, bmEqual(Equal))
 }
 
-func BenchmarkEqualPort(b *testing.B) {
-	sizes := []int{1, 6, 32, 4 << 10, 4 << 20, 64 << 20}
-	benchBytes(b, sizes, bmEqual(EqualPortable))
-}
-
 func bmEqual(equal func([]byte, []byte) bool) func(b *testing.B, n int) {
 	return func(b *testing.B, n int) {
 		if len(bmbuf) < 2*n {
@@ -1061,6 +1058,36 @@ func BenchmarkToLower(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+var toValidUTF8Tests = []struct {
+	in   string
+	repl string
+	out  string
+}{
+	{"", "\uFFFD", ""},
+	{"abc", "\uFFFD", "abc"},
+	{"\uFDDD", "\uFFFD", "\uFDDD"},
+	{"a\xffb", "\uFFFD", "a\uFFFDb"},
+	{"a\xffb\uFFFD", "X", "aXb\uFFFD"},
+	{"a☺\xffb☺\xC0\xAFc☺\xff", "", "a☺b☺c☺"},
+	{"a☺\xffb☺\xC0\xAFc☺\xff", "日本語", "a☺日本語b☺日本語c☺日本語"},
+	{"\xC0\xAF", "\uFFFD", "\uFFFD"},
+	{"\xE0\x80\xAF", "\uFFFD", "\uFFFD"},
+	{"\xed\xa0\x80", "abc", "abc"},
+	{"\xed\xbf\xbf", "\uFFFD", "\uFFFD"},
+	{"\xF0\x80\x80\xaf", "☺", "☺"},
+	{"\xF8\x80\x80\x80\xAF", "\uFFFD", "\uFFFD"},
+	{"\xFC\x80\x80\x80\x80\xAF", "\uFFFD", "\uFFFD"},
+}
+
+func TestToValidUTF8(t *testing.T) {
+	for _, tc := range toValidUTF8Tests {
+		got := ToValidUTF8([]byte(tc.in), []byte(tc.repl))
+		if !Equal(got, []byte(tc.out)) {
+			t.Errorf("ToValidUTF8(%q, %q) = %q; want %q", tc.in, tc.repl, got, tc.out)
+		}
 	}
 }
 
@@ -1701,6 +1728,26 @@ func BenchmarkTrimSpace(b *testing.B) {
 		b.Run(test.name, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				TrimSpace(test.input)
+			}
+		})
+	}
+}
+
+func BenchmarkToValidUTF8(b *testing.B) {
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{"Valid", []byte("typical")},
+		{"InvalidASCII", []byte("foo\xffbar")},
+		{"InvalidNonASCII", []byte("日本語\xff日本語")},
+	}
+	replacement := []byte("\uFFFD")
+	b.ResetTimer()
+	for _, test := range tests {
+		b.Run(test.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				ToValidUTF8(test.input, replacement)
 			}
 		})
 	}

@@ -171,6 +171,10 @@ needtls:
 	// skip TLS setup on Solaris
 	JMP ok
 #endif
+#ifdef GOOS_illumos
+	// skip TLS setup on illumos
+	JMP ok
+#endif
 #ifdef GOOS_darwin
 	// skip TLS setup on Darwin
 	JMP ok
@@ -420,6 +424,7 @@ TEXT runtime·morestack(SB),NOSPLIT,$0-0
 
 	// Called from f.
 	// Set m->morebuf to f's caller.
+	NOP	SP	// tell vet SP changed - stop checking offsets
 	MOVQ	8(SP), AX	// f's caller's PC
 	MOVQ	AX, (m_morebuf+gobuf_pc)(BX)
 	LEAQ	16(SP), AX	// f's caller's SP
@@ -886,7 +891,7 @@ TEXT runtime·aeshash(SB),NOSPLIT,$0-32
 	MOVQ	p+0(FP), AX	// ptr to data
 	MOVQ	s+16(FP), CX	// size
 	LEAQ	ret+24(FP), DX
-	JMP	runtime·aeshashbody(SB)
+	JMP	aeshashbody<>(SB)
 
 // func aeshashstr(p unsafe.Pointer, h uintptr) uintptr
 TEXT runtime·aeshashstr(SB),NOSPLIT,$0-24
@@ -894,12 +899,12 @@ TEXT runtime·aeshashstr(SB),NOSPLIT,$0-24
 	MOVQ	8(AX), CX	// length of string
 	MOVQ	(AX), AX	// string data
 	LEAQ	ret+16(FP), DX
-	JMP	runtime·aeshashbody(SB)
+	JMP	aeshashbody<>(SB)
 
 // AX: data
 // CX: length
 // DX: address to put return value
-TEXT runtime·aeshashbody(SB),NOSPLIT,$0-0
+TEXT aeshashbody<>(SB),NOSPLIT,$0-0
 	// Fill an SSE register with our seeds.
 	MOVQ	h+8(FP), X0			// 64 bits of per-table hash seed
 	PINSRW	$4, CX, X0			// 16 bits of length
@@ -1612,6 +1617,8 @@ restore:
 
 	RET
 
+// runtime.debugCallCheck assumes that functions defined with the
+// DEBUG_CALL_FN macro are safe points to inject calls.
 #define DEBUG_CALL_FN(NAME,MAXSIZE)		\
 TEXT NAME(SB),WRAPPER,$MAXSIZE-0;		\
 	NO_LOCAL_POINTERS;			\

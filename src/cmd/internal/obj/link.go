@@ -377,6 +377,7 @@ const (
 )
 
 // An LSym is the sort of symbol that is written to an object file.
+// It represents Go symbols in a flat pkg+"."+name namespace.
 type LSym struct {
 	Name string
 	Type objabi.SymKind
@@ -648,6 +649,7 @@ type Link struct {
 
 	InParallel           bool // parallel backend phase in effect
 	Framepointer_enabled bool
+	UseBASEntries        bool // Use Base Address Selection Entries in location lists and PC ranges
 
 	// state for writing objects
 	Text []*LSym

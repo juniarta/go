@@ -102,7 +102,10 @@ package test passes, go test prints only the final 'ok' summary
 line. If a package test fails, go test prints the full test output.
 If invoked with the -bench or -v flag, go test prints the full
 output even for passing package tests, in order to display the
-requested benchmark results or verbose logging.
+requested benchmark results or verbose logging. After the package
+tests for all of the listed packages finish, and their output is
+printed, go test prints a final 'FAIL' status if any package test
+has failed.
 
 In package list mode only, go test caches successful package test
 results to avoid unnecessary repeated running of tests. When the
@@ -489,6 +492,9 @@ var (
 	testCacheExpire   time.Time                           // ignore cached test results before this time
 )
 
+// testVetExplicit records whether testVetFlags were set by an explicit -vet.
+var testVetExplicit = false
+
 // testVetFlags is the list of flags to pass to vet when invoked automatically during go test.
 var testVetFlags = []string{
 	// TODO(rsc): Decide which tests are enabled by default.
@@ -530,6 +536,7 @@ func runTest(cmd *base.Command, args []string) {
 
 	work.BuildInit()
 	work.VetFlags = testVetFlags
+	work.VetExplicit = testVetExplicit
 
 	pkgs = load.PackagesForBuild(pkgArgs)
 	if len(pkgs) == 0 {
@@ -735,7 +742,7 @@ func runTest(cmd *base.Command, args []string) {
 	}
 
 	// Ultimately the goal is to print the output.
-	root := &work.Action{Mode: "go test", Deps: prints}
+	root := &work.Action{Mode: "go test", Func: printExitStatus, Deps: prints}
 
 	// Force the printing of results to happen in order,
 	// one at a time.
@@ -835,7 +842,7 @@ func builderTest(b *work.Builder, p *load.Package) (buildAction, runAction, prin
 	if !cfg.BuildN {
 		// writeTestmain writes _testmain.go,
 		// using the test description gathered in t.
-		if err := ioutil.WriteFile(testDir+"_testmain.go", *pmain.Internal.TestmainGo, 0666); err != nil {
+		if err := ioutil.WriteFile(testDir+"_testmain.go", pmain.Internal.TestmainGo, 0666); err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -1630,5 +1637,16 @@ func builderNoTest(b *work.Builder, a *work.Action) error {
 		stdout = json
 	}
 	fmt.Fprintf(stdout, "?   \t%s\t[no test files]\n", a.Package.ImportPath)
+	return nil
+}
+
+// printExitStatus is the action for printing the exit status
+func printExitStatus(b *work.Builder, a *work.Action) error {
+	if !testJSON && len(pkgArgs) != 0 {
+		if base.GetExitStatus() != 0 {
+			fmt.Println("FAIL")
+			return nil
+		}
+	}
 	return nil
 }

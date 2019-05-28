@@ -8,35 +8,13 @@ import (
 	"internal/reflectlite"
 )
 
-// A Wrapper provides context around another error.
-type Wrapper interface {
-	// Unwrap returns the next error in the error chain.
-	// If there is no next error, Unwrap returns nil.
-	Unwrap() error
-}
-
-// Opaque returns an error with the same error formatting as err
-// but that does not match err and cannot be unwrapped.
-func Opaque(err error) error {
-	return noWrapper{err}
-}
-
-type noWrapper struct {
-	error
-}
-
-func (e noWrapper) FormatError(p Printer) (next error) {
-	if f, ok := e.error.(Formatter); ok {
-		return f.FormatError(p)
-	}
-	p.Print(e.error)
-	return nil
-}
-
-// Unwrap returns the result of calling the Unwrap method on err, if err
-// implements Unwrap. Otherwise, Unwrap returns nil.
+// Unwrap returns the result of calling the Unwrap method on err, if err's
+// type contains an Unwrap method returning error.
+// Otherwise, Unwrap returns nil.
 func Unwrap(err error) error {
-	u, ok := err.(Wrapper)
+	u, ok := err.(interface {
+		Unwrap() error
+	})
 	if !ok {
 		return nil
 	}
@@ -51,8 +29,10 @@ func Is(err, target error) bool {
 	if target == nil {
 		return err == target
 	}
+
+	isComparable := reflectlite.TypeOf(target).Comparable()
 	for {
-		if err == target {
+		if isComparable && err == target {
 			return true
 		}
 		if x, ok := err.(interface{ Is(error) bool }); ok && x.Is(target) {

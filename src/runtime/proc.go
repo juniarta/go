@@ -13,6 +13,9 @@ import (
 
 var buildVersion = sys.TheVersion
 
+// set using cmd/go/internal/modload.ModInfoProg
+var modinfo string
+
 // Goroutine scheduler
 // The scheduler's job is to distribute ready-to-run goroutines over worker threads.
 //
@@ -292,7 +295,7 @@ func gopark(unlockf func(*g, unsafe.Pointer) bool, lock unsafe.Pointer, reason w
 		throw("gopark: bad g status")
 	}
 	mp.waitlock = lock
-	mp.waitunlockf = *(*unsafe.Pointer)(unsafe.Pointer(&unlockf))
+	mp.waitunlockf = unlockf
 	gp.waitreason = reason
 	mp.waittraceev = traceEv
 	mp.waittraceskip = traceskip
@@ -483,7 +486,7 @@ func cpuinit() {
 	var env string
 
 	switch GOOS {
-	case "aix", "darwin", "dragonfly", "freebsd", "netbsd", "openbsd", "solaris", "linux":
+	case "aix", "darwin", "dragonfly", "freebsd", "netbsd", "openbsd", "illumos", "solaris", "linux":
 		cpu.DebugOptions = true
 
 		// Similar to goenv_unix but extracts the environment value for
@@ -577,6 +580,11 @@ func schedinit() {
 		// to ensure runtime·buildVersion is kept in the resulting binary.
 		buildVersion = "unknown"
 	}
+	if len(modinfo) == 1 {
+		// Condition should never trigger. This code just serves
+		// to ensure runtime·modinfo is kept in the resulting binary.
+		modinfo = ""
+	}
 }
 
 func dumpgstatus(gp *g) {
@@ -630,7 +638,7 @@ func mcommoninit(mp *m) {
 	unlock(&sched.lock)
 
 	// Allocate memory to hold a cgo traceback if the cgo call crashes.
-	if iscgo || GOOS == "solaris" || GOOS == "windows" {
+	if iscgo || GOOS == "solaris" || GOOS == "illumos" || GOOS == "windows" {
 		mp.cgoCallers = new(cgoCallers)
 	}
 }
@@ -1125,7 +1133,7 @@ func startTheWorldWithSema(emitTraceEvent bool) int64 {
 	return startTime
 }
 
-// Called to start an M.
+// mstart is the entry-point for new Ms.
 //
 // This must not split the stack because we may not even have stack
 // bounds set up yet.
@@ -1150,15 +1158,17 @@ func mstart() {
 		_g_.stack.hi = uintptr(noescape(unsafe.Pointer(&size)))
 		_g_.stack.lo = _g_.stack.hi - size + 1024
 	}
-	// Initialize stack guards so that we can start calling
-	// both Go and C functions with stack growth prologues.
+	// Initialize stack guard so that we can start calling regular
+	// Go code.
 	_g_.stackguard0 = _g_.stack.lo + _StackGuard
+	// This is the g0, so we can also call go:systemstack
+	// functions, which check stackguard1.
 	_g_.stackguard1 = _g_.stackguard0
 	mstart1()
 
 	// Exit this thread.
-	if GOOS == "windows" || GOOS == "solaris" || GOOS == "plan9" || GOOS == "darwin" || GOOS == "aix" {
-		// Window, Solaris, Darwin, AIX and Plan 9 always system-allocate
+	if GOOS == "windows" || GOOS == "solaris" || GOOS == "illumos" || GOOS == "plan9" || GOOS == "darwin" || GOOS == "aix" {
+		// Windows, Solaris, illumos, Darwin, AIX and Plan 9 always system-allocate
 		// the stack, but put it in _g_.stack before mstart,
 		// so the logic above hasn't set osStack yet.
 		osStack = true
@@ -1478,9 +1488,9 @@ func allocm(_p_ *p, fn func()) *m {
 	mp.mstartfn = fn
 	mcommoninit(mp)
 
-	// In case of cgo or Solaris or Darwin, pthread_create will make us a stack.
+	// In case of cgo or Solaris or illumos or Darwin, pthread_create will make us a stack.
 	// Windows and Plan 9 will layout sched stack on OS stack.
-	if iscgo || GOOS == "solaris" || GOOS == "windows" || GOOS == "plan9" || GOOS == "darwin" {
+	if iscgo || GOOS == "solaris" || GOOS == "illumos" || GOOS == "windows" || GOOS == "plan9" || GOOS == "darwin" {
 		mp.g0 = malg(-1)
 	} else {
 		mp.g0 = malg(8192 * sys.StackGuardMultiplier)
@@ -2477,15 +2487,22 @@ top:
 
 	var gp *g
 	var inheritTime bool
+
+	// Normal goroutines will check for need to wakeP in ready,
+	// but GCworkers and tracereaders will not, so the check must
+	// be done here instead.
+	tryWakeP := false
 	if trace.enabled || trace.shutdown {
 		gp = traceReader()
 		if gp != nil {
 			casgstatus(gp, _Gwaiting, _Grunnable)
 			traceGoUnpark(gp, 0)
+			tryWakeP = true
 		}
 	}
 	if gp == nil && gcBlackenEnabled != 0 {
 		gp = gcController.findRunnableGCWorker(_g_.m.p.ptr())
+		tryWakeP = tryWakeP || gp != nil
 	}
 	if gp == nil {
 		// Check the global runnable queue once in a while to ensure fairness.
@@ -2531,6 +2548,13 @@ top:
 		}
 	}
 
+	// If about to schedule a not-normal goroutine (a GCworker or tracereader),
+	// wake a P if there is one.
+	if tryWakeP {
+		if atomic.Load(&sched.npidle) != 0 && atomic.Load(&sched.nmspinning) == 0 {
+			wakep()
+		}
+	}
 	if gp.lockedm != 0 {
 		// Hands off own p to the locked m,
 		// then blocks waiting for a new p.
@@ -2571,8 +2595,7 @@ func park_m(gp *g) {
 	casgstatus(gp, _Grunning, _Gwaiting)
 	dropg()
 
-	if _g_.m.waitunlockf != nil {
-		fn := *(*func(*g, unsafe.Pointer) bool)(unsafe.Pointer(&_g_.m.waitunlockf))
+	if fn := _g_.m.waitunlockf; fn != nil {
 		ok := fn(gp, _g_.m.waitlock)
 		_g_.m.waitunlockf = nil
 		_g_.m.waitlock = nil
@@ -3737,7 +3760,7 @@ func sigprof(pc, sp, lr uintptr, gp *g, mp *m) {
 		// Normal traceback is impossible or has failed.
 		// See if it falls into several common cases.
 		n = 0
-		if (GOOS == "windows" || GOOS == "solaris" || GOOS == "darwin" || GOOS == "aix") && mp.libcallg != 0 && mp.libcallpc != 0 && mp.libcallsp != 0 {
+		if (GOOS == "windows" || GOOS == "solaris" || GOOS == "illumos" || GOOS == "darwin" || GOOS == "aix") && mp.libcallg != 0 && mp.libcallpc != 0 && mp.libcallsp != 0 {
 			// Libcall, i.e. runtime syscall on windows.
 			// Collect Go stack that leads to the call.
 			n = gentraceback(mp.libcallpc, mp.libcallsp, 0, mp.libcallg.ptr(), 0, &stk[0], len(stk), nil, nil, 0)
@@ -4007,34 +4030,25 @@ func procresize(nprocs int32) *p {
 		atomicstorep(unsafe.Pointer(&allp[i]), unsafe.Pointer(pp))
 	}
 
-	// release resources from unused P's
-	for i := nprocs; i < old; i++ {
-		p := allp[i]
-		if trace.enabled && p == getg().m.p.ptr() {
-			// moving to p[0], pretend that we were descheduled
-			// and then scheduled again to keep the trace sane.
-			traceGoSched()
-			traceProcStop(p)
-		}
-		p.destroy()
-		// can't free P itself because it can be referenced by an M in syscall
-	}
-
-	// Trim allp.
-	if int32(len(allp)) != nprocs {
-		lock(&allpLock)
-		allp = allp[:nprocs]
-		unlock(&allpLock)
-	}
-
 	_g_ := getg()
 	if _g_.m.p != 0 && _g_.m.p.ptr().id < nprocs {
 		// continue to use the current P
 		_g_.m.p.ptr().status = _Prunning
 		_g_.m.p.ptr().mcache.prepareForSweep()
 	} else {
-		// release the current P and acquire allp[0]
+		// release the current P and acquire allp[0].
+		//
+		// We must do this before destroying our current P
+		// because p.destroy itself has write barriers, so we
+		// need to do that from a valid P.
 		if _g_.m.p != 0 {
+			if trace.enabled {
+				// Pretend that we were descheduled
+				// and then scheduled again to keep
+				// the trace sane.
+				traceGoSched()
+				traceProcStop(_g_.m.p.ptr())
+			}
 			_g_.m.p.ptr().m = 0
 		}
 		_g_.m.p = 0
@@ -4047,6 +4061,21 @@ func procresize(nprocs int32) *p {
 			traceGoStart()
 		}
 	}
+
+	// release resources from unused P's
+	for i := nprocs; i < old; i++ {
+		p := allp[i]
+		p.destroy()
+		// can't free P itself because it can be referenced by an M in syscall
+	}
+
+	// Trim allp.
+	if int32(len(allp)) != nprocs {
+		lock(&allpLock)
+		allp = allp[:nprocs]
+		unlock(&allpLock)
+	}
+
 	var runnablePs *p
 	for i := nprocs - 1; i >= 0; i-- {
 		p := allp[i]
@@ -4124,7 +4153,7 @@ func releasep() *p {
 	}
 	_p_ := _g_.m.p.ptr()
 	if _p_.m.ptr() != _g_.m || _p_.mcache != _g_.m.mcache || _p_.status != _Prunning {
-		print("releasep: m=", _g_.m, " m->p=", _g_.m.p.ptr(), " p->m=", _p_.m, " m->mcache=", _g_.m.mcache, " p->mcache=", _p_.mcache, " p->status=", _p_.status, "\n")
+		print("releasep: m=", _g_.m, " m->p=", _g_.m.p.ptr(), " p->m=", hex(_p_.m), " m->mcache=", _g_.m.mcache, " p->mcache=", _p_.mcache, " p->status=", _p_.status, "\n")
 		throw("releasep: invalid p state")
 	}
 	if trace.enabled {
@@ -4171,7 +4200,12 @@ func checkdead() {
 	// for details.)
 	var run0 int32
 	if !iscgo && cgoHasExtraM {
-		run0 = 1
+		mp := lockextra(true)
+		haveExtraM := extraMCount > 0
+		unlockextra(mp)
+		if haveExtraM {
+			run0 = 1
+		}
 	}
 
 	run := mcount() - sched.nmidle - sched.nmidlelocked - sched.nmsys
@@ -4247,19 +4281,6 @@ func sysmon() {
 	checkdead()
 	unlock(&sched.lock)
 
-	// If a heap span goes unused for 5 minutes after a garbage collection,
-	// we hand it back to the operating system.
-	scavengelimit := int64(5 * 60 * 1e9)
-
-	if debug.scavenge > 0 {
-		// Scavenge-a-lot for testing.
-		forcegcperiod = 10 * 1e6
-		scavengelimit = 20 * 1e6
-	}
-
-	lastscavenge := nanotime()
-	nscavenge := 0
-
 	lasttrace := int64(0)
 	idle := 0 // how many cycles in succession we had not wokeup somebody
 	delay := uint32(0)
@@ -4281,9 +4302,6 @@ func sysmon() {
 				// Make wake-up period small enough
 				// for the sampling to be correct.
 				maxsleep := forcegcperiod / 2
-				if scavengelimit < forcegcperiod {
-					maxsleep = scavengelimit / 2
-				}
 				shouldRelax := true
 				if osRelaxMinNS > 0 {
 					next := timeSleepUntil()
@@ -4345,12 +4363,6 @@ func sysmon() {
 			list.push(forcegc.g)
 			injectglist(&list)
 			unlock(&forcegc.lock)
-		}
-		// scavenge heap once in a while
-		if lastscavenge+scavengelimit/2 < now {
-			mheap_.scavenge(int32(nscavenge), uint64(now), uint64(scavengelimit))
-			lastscavenge = now
-			nscavenge++
 		}
 		if debug.schedtrace > 0 && lasttrace+int64(debug.schedtrace)*1000000 <= now {
 			lasttrace = now

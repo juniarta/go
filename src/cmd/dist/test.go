@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -190,6 +191,11 @@ func (t *tester) run() {
 		}
 	}
 
+	// On a few builders, make GOROOT unwritable to catch tests writing to it.
+	if strings.HasPrefix(os.Getenv("GO_BUILDER_NAME"), "linux-") {
+		t.makeGOROOTUnwritable()
+	}
+
 	for _, dt := range t.tests {
 		if !t.shouldRunTest(dt.name) {
 			t.partial = true
@@ -272,8 +278,17 @@ func (t *tester) tags() string {
 	return "-tags="
 }
 
+// timeoutDuration converts the provided number of seconds into a
+// time.Duration, scaled by the t.timeoutScale factor.
+func (t *tester) timeoutDuration(sec int) time.Duration {
+	return time.Duration(sec) * time.Second * time.Duration(t.timeoutScale)
+}
+
+// timeout returns the "-timeout=" string argument to "go test" given
+// the number of seconds of timeout. It scales it by the
+// t.timeoutScale factor.
 func (t *tester) timeout(sec int) string {
-	return "-timeout=" + fmt.Sprint(time.Duration(sec)*time.Second*time.Duration(t.timeoutScale))
+	return "-timeout=" + t.timeoutDuration(sec).String()
 }
 
 // ranGoTest and stdMatches are state closed over by the stdlib
@@ -313,6 +328,11 @@ func (t *tester) registerStdTest(pkg string) {
 					timeoutSec *= 3
 					break
 				}
+			}
+			// Special case for our slow cross-compiled
+			// qemu builders:
+			if t.shouldUsePrecompiledStdTest() {
+				return t.runPrecompiledStdTest(t.timeoutDuration(timeoutSec))
 			}
 			args := []string{
 				"test",
@@ -378,22 +398,6 @@ func (t *tester) registerRaceBenchTest(pkg string) {
 var stdOutErrAreTerminals func() bool
 
 func (t *tester) registerTests() {
-	if strings.HasSuffix(os.Getenv("GO_BUILDER_NAME"), "-vetall") {
-		// Run vet over std and cmd and call it quits.
-		for k := range cgoEnabled {
-			osarch := k
-			t.tests = append(t.tests, distTest{
-				name:    "vet/" + osarch,
-				heading: "cmd/vet/all",
-				fn: func(dt *distTest) error {
-					t.addCmd(dt, "src/cmd/vet/all", "go", "run", "main.go", "-p="+osarch)
-					return nil
-				},
-			})
-		}
-		return
-	}
-
 	// Fast path to avoid the ~1 second of `go list std cmd` when
 	// the caller lists specific tests to run. (as the continuous
 	// build coordinator does).
@@ -562,14 +566,16 @@ func (t *tester) registerTests() {
 			name:    "nolibgcc:" + pkg,
 			heading: "Testing without libgcc.",
 			fn: func(dt *distTest) error {
-				t.addCmd(dt, "src", t.goTest(), "-ldflags=-linkmode=internal -libgcc=none", pkg, t.runFlag(run))
+				// What matters is that the tests build and start up.
+				// Skip expensive tests, especially x509 TestSystemRoots.
+				t.addCmd(dt, "src", t.goTest(), "-ldflags=-linkmode=internal -libgcc=none", "-run=^Test[^CS]", pkg, t.runFlag(run))
 				return nil
 			},
 		})
 	}
 
 	// Test internal linking of PIE binaries where it is supported.
-	if goos == "linux" && goarch == "amd64" {
+	if goos == "linux" && (goarch == "amd64" || goarch == "arm64") {
 		t.tests = append(t.tests, distTest{
 			name:    "pie_internal",
 			heading: "internal linking of -buildmode=pie",
@@ -667,8 +673,8 @@ func (t *tester) registerTests() {
 	// recompile the entire standard library. If make.bash ran with
 	// special -gcflags, that's not true.
 	if t.cgoEnabled && gogcflags == "" {
-		t.registerTest("testso", "../misc/cgo/testso", t.goTest(), t.timeout(600))
-		t.registerTest("testsovar", "../misc/cgo/testsovar", t.goTest(), t.timeout(600))
+		t.registerTest("testso", "../misc/cgo/testso", t.goTest(), t.timeout(600), ".")
+		t.registerTest("testsovar", "../misc/cgo/testsovar", t.goTest(), t.timeout(600), ".")
 		if t.supportedBuildmode("c-archive") {
 			t.registerHostTest("testcarchive", "../misc/cgo/testcarchive", "misc/cgo/testcarchive", ".")
 		}
@@ -676,10 +682,10 @@ func (t *tester) registerTests() {
 			t.registerHostTest("testcshared", "../misc/cgo/testcshared", "misc/cgo/testcshared", ".")
 		}
 		if t.supportedBuildmode("shared") {
-			t.registerTest("testshared", "../misc/cgo/testshared", t.goTest(), t.timeout(600))
+			t.registerTest("testshared", "../misc/cgo/testshared", t.goTest(), t.timeout(600), ".")
 		}
 		if t.supportedBuildmode("plugin") {
-			t.registerTest("testplugin", "../misc/cgo/testplugin", t.goTest(), t.timeout(600))
+			t.registerTest("testplugin", "../misc/cgo/testplugin", t.goTest(), t.timeout(600), ".")
 		}
 		if gohostos == "linux" && goarch == "amd64" {
 			t.registerTest("testasan", "../misc/cgo/testasan", "go", "run", "main.go")
@@ -704,15 +710,21 @@ func (t *tester) registerTests() {
 	}
 
 	if goos != "android" && !t.iOS() {
-		t.registerTest("bench_go1", "../test/bench/go1", t.goTest(), t.timeout(600))
+		// There are no tests in this directory, only benchmarks.
+		// Check that the test binary builds but don't bother running it.
+		// (It has init-time work to set up for the benchmarks that is not worth doing unnecessarily.)
+		t.registerTest("bench_go1", "../test/bench/go1", t.goTest(), "-c", "-o="+os.DevNull)
 	}
 	if goos != "android" && !t.iOS() {
 		// Only start multiple test dir shards on builders,
 		// where they get distributed to multiple machines.
-		// See issue 20141.
+		// See issues 20141 and 31834.
 		nShards := 1
 		if os.Getenv("GO_BUILDER_NAME") != "" {
 			nShards = 10
+		}
+		if n, err := strconv.Atoi(os.Getenv("GO_TEST_SHARDS")); err == nil {
+			nShards = n
 		}
 		for shard := 0; shard < nShards; shard++ {
 			shard := shard
@@ -910,7 +922,7 @@ func (t *tester) internalLink() bool {
 	// Internally linking cgo is incomplete on some architectures.
 	// https://golang.org/issue/10373
 	// https://golang.org/issue/14449
-	if goarch == "arm64" || goarch == "mips64" || goarch == "mips64le" || goarch == "mips" || goarch == "mipsle" {
+	if goarch == "mips64" || goarch == "mips64le" || goarch == "mips" || goarch == "mipsle" {
 		return false
 	}
 	if goos == "aix" {
@@ -999,7 +1011,7 @@ func (t *tester) runHostTest(dir, pkg string) error {
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	return t.dirCmd(dir, "./test.test").Run()
+	return t.dirCmd(dir, "./test.test", "-test.short").Run()
 }
 
 func (t *tester) cgoTest(dt *distTest) error {
@@ -1030,7 +1042,7 @@ func (t *tester) cgoTest(dt *distTest) error {
 		"dragonfly-amd64",
 		"freebsd-386", "freebsd-amd64", "freebsd-arm",
 		"linux-386", "linux-amd64", "linux-arm", "linux-ppc64le", "linux-s390x",
-		"netbsd-386", "netbsd-amd64":
+		"netbsd-386", "netbsd-amd64", "linux-arm64":
 
 		cmd := t.addCmd(dt, "misc/cgo/test", t.goTest())
 		cmd.Env = append(os.Environ(), "GOFLAGS=-ldflags=-linkmode=external")
@@ -1103,6 +1115,13 @@ func (t *tester) runPending(nextTest *distTest) {
 			} else {
 				timelog("start", w.dt.name)
 				w.out, w.err = w.cmd.CombinedOutput()
+				if w.err != nil {
+					if isUnsupportedVMASize(w) {
+						timelog("skip", w.dt.name)
+						w.out = []byte(fmt.Sprintf("skipped due to unsupported VMA\n"))
+						w.err = nil
+					}
+				}
 			}
 			timelog("end", w.dt.name)
 			w.end <- true
@@ -1114,7 +1133,6 @@ func (t *tester) runPending(nextTest *distTest) {
 	var last *distTest
 	for ended < len(worklist) {
 		for started < len(worklist) && started-ended < maxbg {
-			//println("start", started)
 			w := worklist[started]
 			started++
 			w.start <- !t.failed || t.keepGoing
@@ -1135,7 +1153,6 @@ func (t *tester) runPending(nextTest *distTest) {
 		if vflag > 1 {
 			errprintf("%s\n", strings.Join(w.cmd.Args, " "))
 		}
-		//println("wait", ended)
 		ended++
 		<-w.end
 		os.Stdout.Write(w.out)
@@ -1295,8 +1312,12 @@ func (t *tester) raceTest(dt *distTest) error {
 	// TODO(iant): Figure out how to catch this.
 	// t.addCmd(dt, "src", t.goTest(),  "-race", "-run=TestParallelTest", "cmd/go")
 	if t.cgoEnabled {
-		cmd := t.addCmd(dt, "misc/cgo/test", t.goTest(), "-race")
-		cmd.Env = append(os.Environ(), "GOTRACEBACK=2")
+		// Building misc/cgo/test takes a long time.
+		// There are already cgo-enabled packages being tested with the race detector.
+		// We shouldn't need to redo all of misc/cgo/test too.
+		// The race buildler will take care of this.
+		// cmd := t.addCmd(dt, "misc/cgo/test", t.goTest(), "-race")
+		// cmd.Env = append(os.Environ(), "GOTRACEBACK=2")
 	}
 	if t.extLink() {
 		// Test with external linking; see issue 9133.
@@ -1380,9 +1401,98 @@ func (t *tester) packageHasBenchmarks(pkg string) bool {
 	return false
 }
 
+// makeGOROOTUnwritable makes all $GOROOT files & directories non-writable to
+// check that no tests accidentally write to $GOROOT.
+func (t *tester) makeGOROOTUnwritable() {
+	if os.Getenv("GO_BUILDER_NAME") == "" {
+		panic("not a builder")
+	}
+	if os.Getenv("GOROOT") == "" {
+		panic("GOROOT not set")
+	}
+	err := filepath.Walk(os.Getenv("GOROOT"), func(name string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !fi.Mode().IsRegular() && !fi.IsDir() {
+			return nil
+		}
+		mode := fi.Mode()
+		newMode := mode & ^os.FileMode(0222)
+		if newMode != mode {
+			if err := os.Chmod(name, newMode); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatalf("making builder's files read-only: %v", err)
+	}
+}
+
+// shouldUsePrecompiledStdTest reports whether "dist test" should use
+// a pre-compiled go test binary on disk rather than running "go test"
+// and compiling it again. This is used by our slow qemu-based builder
+// that do full processor emulation where we cross-compile the
+// make.bash step as well as pre-compile each std test binary.
+//
+// This only reports true if dist is run with an single go_test:foo
+// argument (as the build coordinator does with our slow qemu-based
+// builders), we're in a builder environment ("GO_BUILDER_NAME" is set),
+// and the pre-built test binary exists.
+func (t *tester) shouldUsePrecompiledStdTest() bool {
+	bin := t.prebuiltGoPackageTestBinary()
+	if bin == "" {
+		return false
+	}
+	_, err := os.Stat(bin)
+	return err == nil
+}
+
+// prebuiltGoPackageTestBinary returns the path where we'd expect
+// the pre-built go test binary to be on disk when dist test is run with
+// a single argument.
+// It returns an empty string if a pre-built binary should not be used.
+func (t *tester) prebuiltGoPackageTestBinary() string {
+	if len(stdMatches) != 1 || t.race || t.compileOnly || os.Getenv("GO_BUILDER_NAME") == "" {
+		return ""
+	}
+	pkg := stdMatches[0]
+	return filepath.Join(os.Getenv("GOROOT"), "src", pkg, path.Base(pkg)+".test")
+}
+
+// runPrecompiledStdTest runs the pre-compiled standard library package test binary.
+// See shouldUsePrecompiledStdTest above; it must return true for this to be called.
+func (t *tester) runPrecompiledStdTest(timeout time.Duration) error {
+	bin := t.prebuiltGoPackageTestBinary()
+	fmt.Fprintf(os.Stderr, "# %s: using pre-built %s...\n", stdMatches[0], bin)
+	cmd := exec.Command(bin, "-test.short", "-test.timeout="+timeout.String())
+	cmd.Dir = filepath.Dir(bin)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// And start a timer to kill the process if it doesn't kill
+	// itself in the prescribed timeout.
+	const backupKillFactor = 1.05 // add 5%
+	timer := time.AfterFunc(time.Duration(float64(timeout)*backupKillFactor), func() {
+		fmt.Fprintf(os.Stderr, "# %s: timeout running %s; killing...\n", stdMatches[0], bin)
+		cmd.Process.Kill()
+	})
+	defer timer.Stop()
+	return cmd.Wait()
+}
+
 // raceDetectorSupported is a copy of the function
 // cmd/internal/sys.RaceDetectorSupported, which can't be used here
 // because cmd/dist has to be buildable by Go 1.4.
+// The race detector only supports 48-bit VMA on arm64. But we don't have
+// a good solution to check VMA size(See https://golang.org/issue/29948)
+// raceDetectorSupported will always return true for arm64. But race
+// detector tests may abort on non 48-bit VMA configuration, the tests
+// will be marked as "skipped" in this case.
 func raceDetectorSupported(goos, goarch string) bool {
 	switch goos {
 	case "linux":
@@ -1403,4 +1513,12 @@ func mSanSupported(goos, goarch string) bool {
 	default:
 		return false
 	}
+}
+
+// isUnsupportedVMASize reports whether the failure is caused by an unsupported
+// VMA for the race detector (for example, running the race detector on an
+// arm64 machine configured with 39-bit VMA)
+func isUnsupportedVMASize(w *work) bool {
+	unsupportedVMA := []byte("unsupported VMA range")
+	return w.dt.name == "race" && bytes.Contains(w.out, unsupportedVMA)
 }

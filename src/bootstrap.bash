@@ -45,10 +45,11 @@ fi
 unset GOROOT
 src=$(cd .. && pwd)
 echo "#### Copying to $targ"
-cp -R "$src" "$targ"
+cp -Rp "$src" "$targ"
 cd "$targ"
 echo
 echo "#### Cleaning $targ"
+chmod -R +w .
 rm -f .gitignore
 if [ -e .git ]; then
 	git clean -f -d

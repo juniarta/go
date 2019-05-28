@@ -131,6 +131,7 @@ func TestDriverPanic(t *testing.T) {
 }
 
 func exec(t testing.TB, db *DB, query string, args ...interface{}) {
+	t.Helper()
 	_, err := db.Exec(query, args...)
 	if err != nil {
 		t.Fatalf("Exec of %q: %v", query, err)
@@ -1401,7 +1402,7 @@ func TestInvalidNilValues(t *testing.T) {
 		{
 			name:          "int",
 			input:         &date2,
-			expectedError: `sql: Scan error on column index 0, name "bdate": converting driver.Value type <nil> ("<nil>") to a int: invalid syntax`,
+			expectedError: `sql: Scan error on column index 0, name "bdate": converting NULL to int is unsupported`,
 		},
 	}
 
@@ -1667,6 +1668,18 @@ func TestNullInt64Param(t *testing.T) {
 		{NullInt64{33, true}, 1, NullInt64{33, true}},
 		{NullInt64{222, false}, 1, NullInt64{0, false}},
 		{0, NullInt64{31, false}, nil},
+	}}
+	nullTestRun(t, spec)
+}
+
+func TestNullInt32Param(t *testing.T) {
+	spec := nullTestSpec{"nullint32", "int32", [6]nullTestRow{
+		{NullInt32{31, true}, 1, NullInt32{31, true}},
+		{NullInt32{-22, false}, 1, NullInt32{0, false}},
+		{22, 1, NullInt32{22, true}},
+		{NullInt32{33, true}, 1, NullInt32{33, true}},
+		{NullInt32{222, false}, 1, NullInt32{0, false}},
+		{0, NullInt32{31, false}, nil},
 	}}
 	nullTestRun(t, spec)
 }

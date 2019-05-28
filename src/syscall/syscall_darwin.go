@@ -188,7 +188,7 @@ func Getfsstat(buf []Statfs_t, flags int) (n int, err error) {
 		_p0 = unsafe.Pointer(&buf[0])
 		bufsize = unsafe.Sizeof(Statfs_t{}) * uintptr(len(buf))
 	}
-	r0, _, e1 := syscall(funcPC(libc_getfsstat64_trampoline), uintptr(_p0), bufsize, uintptr(flags))
+	r0, _, e1 := syscall(funcPC(libc_getfsstat_trampoline), uintptr(_p0), bufsize, uintptr(flags))
 	n = int(r0)
 	if e1 != 0 {
 		err = e1
@@ -196,10 +196,10 @@ func Getfsstat(buf []Statfs_t, flags int) (n int, err error) {
 	return
 }
 
-func libc_getfsstat64_trampoline()
+func libc_getfsstat_trampoline()
 
-//go:linkname libc_getfsstat64 libc_getfsstat64
-//go:cgo_import_dynamic libc_getfsstat64 getfsstat64 "/usr/lib/libSystem.B.dylib"
+//go:linkname libc_getfsstat libc_getfsstat
+//go:cgo_import_dynamic libc_getfsstat getfsstat "/usr/lib/libSystem.B.dylib"
 
 func setattrlistTimes(path string, times []Timespec) error {
 	_p0, err := BytePtrFromString(path)
@@ -346,6 +346,20 @@ func Kill(pid int, signum Signal) (err error) { return kill(pid, int(signum), 1)
 func init() {
 	execveDarwin = execve
 }
+
+func fdopendir(fd int) (dir uintptr, err error) {
+	r0, _, e1 := syscallPtr(funcPC(libc_fdopendir_trampoline), uintptr(fd), 0, 0)
+	dir = uintptr(r0)
+	if e1 != 0 {
+		err = errnoErr(e1)
+	}
+	return
+}
+
+func libc_fdopendir_trampoline()
+
+//go:linkname libc_fdopendir libc_fdopendir
+//go:cgo_import_dynamic libc_fdopendir fdopendir "/usr/lib/libSystem.B.dylib"
 
 func readlen(fd int, buf *byte, nbuf int) (n int, err error) {
 	r0, _, e1 := syscall(funcPC(libc_read_trampoline), uintptr(fd), uintptr(unsafe.Pointer(buf)), uintptr(nbuf))

@@ -631,7 +631,11 @@ func typecheck1(n *Node, top int) (res *Node) {
 				n.Type = nil
 				return n
 			}
-
+			if t.IsSigned() && !langSupported(1, 13) {
+				yyerror("invalid operation: %v (signed shift count type %v, only supported as of -lang=go1.13)", n, r.Type)
+				n.Type = nil
+				return n
+			}
 			t = l.Type
 			if t != nil && t.Etype != TIDEAL && !t.IsInteger() {
 				yyerror("invalid operation: %v (shift of type %v)", n, t)
@@ -3667,7 +3671,11 @@ func typecheckdef(n *Node) {
 					n.SetDiag(true)
 					goto ret
 				}
-				n.Sym.Def = asTypesNode(p.Ntype)
+				// For package-level type aliases, set n.Sym.Def so we can identify
+				// it as a type alias during export. See also #31959.
+				if n.Name.Curfn == nil {
+					n.Sym.Def = asTypesNode(p.Ntype)
+				}
 			}
 			break
 		}

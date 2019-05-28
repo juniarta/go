@@ -82,15 +82,6 @@ func (it *PCIter) init(p []byte) {
 	it.next()
 }
 
-func addpctab(ctxt *Link, ftab *sym.Symbol, off int32, d *sym.Pcdata) int32 {
-	var start int32
-	if len(d.P) > 0 {
-		start = int32(len(ftab.P))
-		ftab.AddBytes(d.P)
-	}
-	return int32(ftab.SetUint32(ctxt.Arch, int64(off), uint32(start)))
-}
-
 func ftabaddstring(ftab *sym.Symbol, s string) int32 {
 	start := len(ftab.P)
 	ftab.Grow(int64(start + len(s) + 1)) // make room for s plus trailing NUL
@@ -201,7 +192,6 @@ func (ctxt *Link) pclntab() {
 	//	function table, alternating PC and offset to func struct [each entry thearch.ptrsize bytes]
 	//	end PC [thearch.ptrsize bytes]
 	//	offset to file table [4 bytes]
-	nfunc := int32(0)
 
 	// Find container symbols and mark them as such.
 	for _, s := range ctxt.Textp {
@@ -210,9 +200,15 @@ func (ctxt *Link) pclntab() {
 		}
 	}
 
+	// Gather some basic stats and info.
+	var nfunc int32
 	for _, s := range ctxt.Textp {
-		if emitPcln(ctxt, s) {
-			nfunc++
+		if !emitPcln(ctxt, s) {
+			continue
+		}
+		nfunc++
+		if pclntabFirstFunc == nil {
+			pclntabFirstFunc = s
 		}
 	}
 
@@ -234,20 +230,28 @@ func (ctxt *Link) pclntab() {
 		return nameoff
 	}
 
-	nfunc = 0
-	var last *sym.Symbol
+	pctaboff := make(map[string]uint32)
+	writepctab := func(off int32, p []byte) int32 {
+		start, ok := pctaboff[string(p)]
+		if !ok {
+			if len(p) > 0 {
+				start = uint32(len(ftab.P))
+				ftab.AddBytes(p)
+			}
+			pctaboff[string(p)] = start
+		}
+		newoff := int32(ftab.SetUint32(ctxt.Arch, int64(off), start))
+		return newoff
+	}
+
+	nfunc = 0 // repurpose nfunc as a running index
 	for _, s := range ctxt.Textp {
-		last = s
 		if !emitPcln(ctxt, s) {
 			continue
 		}
 		pcln := s.FuncInfo
 		if pcln == nil {
 			pcln = &pclntabZpcln
-		}
-
-		if pclntabFirstFunc == nil {
-			pclntabFirstFunc = s
 		}
 
 		if len(pcln.InlTree) > 0 {
@@ -270,7 +274,7 @@ func (ctxt *Link) pclntab() {
 		}
 
 		funcstart := int32(len(ftab.P))
-		funcstart += int32(-len(ftab.P)) & (int32(ctxt.Arch.PtrSize) - 1)
+		funcstart += int32(-len(ftab.P)) & (int32(ctxt.Arch.PtrSize) - 1) // align to ptrsize
 
 		ftab.SetAddr(ctxt.Arch, 8+int64(ctxt.Arch.PtrSize)+int64(nfunc)*2*int64(ctxt.Arch.PtrSize), s)
 		ftab.SetUint(ctxt.Arch, 8+int64(ctxt.Arch.PtrSize)+int64(nfunc)*2*int64(ctxt.Arch.PtrSize)+int64(ctxt.Arch.PtrSize), uint64(funcstart))
@@ -371,10 +375,9 @@ func (ctxt *Link) pclntab() {
 		}
 
 		// pcdata
-		off = addpctab(ctxt, ftab, off, &pcln.Pcsp)
-
-		off = addpctab(ctxt, ftab, off, &pcln.Pcfile)
-		off = addpctab(ctxt, ftab, off, &pcln.Pcline)
+		off = writepctab(off, pcln.Pcsp.P)
+		off = writepctab(off, pcln.Pcfile.P)
+		off = writepctab(off, pcln.Pcline.P)
 		off = int32(ftab.SetUint32(ctxt.Arch, int64(off), uint32(len(pcln.Pcdata))))
 
 		// funcID uint8
@@ -392,7 +395,7 @@ func (ctxt *Link) pclntab() {
 		// nfuncdata must be the final entry.
 		off = int32(ftab.SetUint8(ctxt.Arch, int64(off), uint8(len(pcln.Funcdata))))
 		for i := range pcln.Pcdata {
-			off = addpctab(ctxt, ftab, off, &pcln.Pcdata[i])
+			off = writepctab(off, pcln.Pcdata[i].P)
 		}
 
 		// funcdata, must be pointer-aligned and we're only int32-aligned.
@@ -402,16 +405,15 @@ func (ctxt *Link) pclntab() {
 				off += 4
 			}
 			for i := range pcln.Funcdata {
+				dataoff := int64(off) + int64(ctxt.Arch.PtrSize)*int64(i)
 				if pcln.Funcdata[i] == nil {
-					ftab.SetUint(ctxt.Arch, int64(off)+int64(ctxt.Arch.PtrSize)*int64(i), uint64(pcln.Funcdataoff[i]))
-				} else {
-					// TODO: Dedup.
-					funcdataBytes += pcln.Funcdata[i].Size
-
-					ftab.SetAddrPlus(ctxt.Arch, int64(off)+int64(ctxt.Arch.PtrSize)*int64(i), pcln.Funcdata[i], pcln.Funcdataoff[i])
+					ftab.SetUint(ctxt.Arch, dataoff, uint64(pcln.Funcdataoff[i]))
+					continue
 				}
+				// TODO: Dedup.
+				funcdataBytes += pcln.Funcdata[i].Size
+				ftab.SetAddrPlus(ctxt.Arch, dataoff, pcln.Funcdata[i], pcln.Funcdataoff[i])
 			}
-
 			off += int32(len(pcln.Funcdata)) * int32(ctxt.Arch.PtrSize)
 		}
 
@@ -423,6 +425,7 @@ func (ctxt *Link) pclntab() {
 		nfunc++
 	}
 
+	last := ctxt.Textp[len(ctxt.Textp)-1]
 	pclntabLastFunc = last
 	// Final entry of table is just end pc.
 	ftab.SetAddrPlus(ctxt.Arch, 8+int64(ctxt.Arch.PtrSize)+int64(nfunc)*2*int64(ctxt.Arch.PtrSize), last, last.Size)

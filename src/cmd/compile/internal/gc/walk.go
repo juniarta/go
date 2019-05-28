@@ -1210,7 +1210,7 @@ opswitch:
 			// Allocate one bucket pointed to by hmap.buckets on stack if hint
 			// is not larger than BUCKETSIZE. In case hint is larger than
 			// BUCKETSIZE runtime.makemap will allocate the buckets on the heap.
-			// Maximum key and value size is 128 bytes, larger objects
+			// Maximum key and elem size is 128 bytes, larger objects
 			// are stored with an indirection. So max bucket size is 2048+eps.
 			if !Isconst(hint, CTINT) ||
 				hint.Val().U.(*Mpint).CmpInt64(BUCKETSIZE) <= 0 {
@@ -1355,49 +1355,35 @@ opswitch:
 		a := nodnil()
 		if n.Esc == EscNone {
 			t := types.NewArray(types.Types[TUINT8], 4)
-			var_ := temp(t)
-			a = nod(OADDR, var_, nil)
+			a = nod(OADDR, temp(t), nil)
 		}
-
 		// intstring(*[4]byte, rune)
 		n = mkcall("intstring", n.Type, init, a, conv(n.Left, types.Types[TINT64]))
 
-	case OBYTES2STR:
+	case OBYTES2STR, ORUNES2STR:
 		a := nodnil()
 		if n.Esc == EscNone {
 			// Create temporary buffer for string on stack.
 			t := types.NewArray(types.Types[TUINT8], tmpstringbufsize)
-
 			a = nod(OADDR, temp(t), nil)
 		}
+		fn := "slicebytetostring"
+		if n.Op == ORUNES2STR {
+			fn = "slicerunetostring"
+		}
+		// slicebytetostring(*[32]byte, []byte) string
+		// slicerunetostring(*[32]byte, []rune) string
+		n = mkcall(fn, n.Type, init, a, n.Left)
 
-		// slicebytetostring(*[32]byte, []byte) string;
-		n = mkcall("slicebytetostring", n.Type, init, a, n.Left)
-
-		// slicebytetostringtmp([]byte) string;
 	case OBYTES2STRTMP:
 		n.Left = walkexpr(n.Left, init)
-
 		if !instrumenting {
 			// Let the backend handle OBYTES2STRTMP directly
 			// to avoid a function call to slicebytetostringtmp.
 			break
 		}
-
+		// slicebytetostringtmp([]byte) string
 		n = mkcall("slicebytetostringtmp", n.Type, init, n.Left)
-
-		// slicerunetostring(*[32]byte, []rune) string;
-	case ORUNES2STR:
-		a := nodnil()
-
-		if n.Esc == EscNone {
-			// Create temporary buffer for string on stack.
-			t := types.NewArray(types.Types[TUINT8], tmpstringbufsize)
-
-			a = nod(OADDR, temp(t), nil)
-		}
-
-		n = mkcall("slicerunetostring", n.Type, init, a, n.Left)
 
 	case OSTR2BYTES:
 		s := n.Left
@@ -1431,16 +1417,14 @@ opswitch:
 			n = walkexpr(n, init)
 			break
 		}
-		a := nodnil()
 
+		a := nodnil()
 		if n.Esc == EscNone {
 			// Create temporary buffer for slice on stack.
 			t := types.NewArray(types.Types[TUINT8], tmpstringbufsize)
-
 			a = nod(OADDR, temp(t), nil)
 		}
-
-		// stringtoslicebyte(*32[byte], string) []byte;
+		// stringtoslicebyte(*32[byte], string) []byte
 		n = mkcall("stringtoslicebyte", n.Type, init, a, conv(s, types.Types[TSTRING]))
 
 	case OSTR2BYTESTMP:
@@ -1453,17 +1437,14 @@ opswitch:
 		// for i, c := range []byte(string)
 		n.Left = walkexpr(n.Left, init)
 
-		// stringtoslicerune(*[32]rune, string) []rune
 	case OSTR2RUNES:
 		a := nodnil()
-
 		if n.Esc == EscNone {
 			// Create temporary buffer for slice on stack.
 			t := types.NewArray(types.Types[TINT32], tmpstringbufsize)
-
 			a = nod(OADDR, temp(t), nil)
 		}
-
+		// stringtoslicerune(*[32]rune, string) []rune
 		n = mkcall("stringtoslicerune", n.Type, init, a, conv(n.Left, types.Types[TSTRING]))
 
 	case OARRAYLIT, OSLICELIT, OMAPLIT, OSTRUCTLIT, OPTRLIT:
@@ -2481,7 +2462,7 @@ var mapassign = mkmapnames("mapassign", "ptr")
 var mapdelete = mkmapnames("mapdelete", "")
 
 func mapfast(t *types.Type) int {
-	// Check runtime/map.go:maxValueSize before changing.
+	// Check runtime/map.go:maxElemSize before changing.
 	if t.Elem().Width > 128 {
 		return mapslow
 	}
@@ -2536,7 +2517,6 @@ func addstr(n *Node, init *Nodes) *Node {
 		if sz < tmpstringbufsize {
 			// Create temporary buffer for result string on stack.
 			t := types.NewArray(types.Types[TUINT8], tmpstringbufsize)
-
 			buf = nod(OADDR, temp(t), nil)
 		}
 	}

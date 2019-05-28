@@ -16,8 +16,6 @@ import (
 )
 
 var Register = map[string]int16{
-	"PC_F":  REG_PC_F,
-	"PC_B":  REG_PC_B,
 	"SP":    REG_SP,
 	"CTXT":  REG_CTXT,
 	"g":     REG_g,
@@ -60,6 +58,8 @@ var Register = map[string]int16{
 	"F13": REG_F13,
 	"F14": REG_F14,
 	"F15": REG_F15,
+
+	"PC_B": REG_PC_B,
 }
 
 var registerNames []string
@@ -368,20 +368,31 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				break
 			}
 
-			// reset PC_B to function entry
-			p = appendp(p, AI32Const, constAddr(0))
-			p = appendp(p, ASet, regAddr(REG_PC_B))
-
 			// low-level WebAssembly call to function
 			switch jmp.To.Type {
 			case obj.TYPE_MEM:
+				if !notUsePC_B[jmp.To.Sym.Name] {
+					// Set PC_B parameter to function entry.
+					p = appendp(p, AI32Const, constAddr(0))
+				}
 				p = appendp(p, ACall, jmp.To)
+
 			case obj.TYPE_NONE:
 				// (target PC is on stack)
 				p = appendp(p, AI32WrapI64)
 				p = appendp(p, AI32Const, constAddr(16)) // only needs PC_F bits (16-31), PC_B bits (0-15) are zero
 				p = appendp(p, AI32ShrU)
+
+				// Set PC_B parameter to function entry.
+				// We need to push this before pushing the target PC_F,
+				// so temporarily pop PC_F, using our REG_PC_B as a
+				// scratch register, and push it back after pushing 0.
+				p = appendp(p, ASet, regAddr(REG_PC_B))
+				p = appendp(p, AI32Const, constAddr(0))
+				p = appendp(p, AGet, regAddr(REG_PC_B))
+
 				p = appendp(p, ACallIndirect)
+
 			default:
 				panic("bad target for JMP")
 			}
@@ -419,20 +430,31 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			})
 			p = appendp(p, AI64Store, constAddr(0))
 
-			// reset PC_B to function entry
-			p = appendp(p, AI32Const, constAddr(0))
-			p = appendp(p, ASet, regAddr(REG_PC_B))
-
 			// low-level WebAssembly call to function
 			switch call.To.Type {
 			case obj.TYPE_MEM:
+				if !notUsePC_B[call.To.Sym.Name] {
+					// Set PC_B parameter to function entry.
+					p = appendp(p, AI32Const, constAddr(0))
+				}
 				p = appendp(p, ACall, call.To)
+
 			case obj.TYPE_NONE:
 				// (target PC is on stack)
 				p = appendp(p, AI32WrapI64)
 				p = appendp(p, AI32Const, constAddr(16)) // only needs PC_F bits (16-31), PC_B bits (0-15) are zero
 				p = appendp(p, AI32ShrU)
+
+				// Set PC_B parameter to function entry.
+				// We need to push this before pushing the target PC_F,
+				// so temporarily pop PC_F, using our PC_B as a
+				// scratch register, and push it back after pushing 0.
+				p = appendp(p, ASet, regAddr(REG_PC_B))
+				p = appendp(p, AI32Const, constAddr(0))
+				p = appendp(p, AGet, regAddr(REG_PC_B))
+
 				p = appendp(p, ACallIndirect)
+
 			default:
 				panic("bad target for CALL")
 			}
@@ -465,7 +487,13 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 			// jump to before the call if jmpdefer has reset the return address to the call's PC
 			if call.To.Sym == deferreturn {
-				p = appendp(p, AGet, regAddr(REG_PC_B))
+				// get PC_B from -8(SP)
+				p = appendp(p, AGet, regAddr(REG_SP))
+				p = appendp(p, AI32Const, constAddr(8))
+				p = appendp(p, AI32Sub)
+				p = appendp(p, AI32Load16U, constAddr(0))
+				p = appendp(p, ATee, regAddr(REG_PC_B))
+
 				p = appendp(p, AI32Const, constAddr(call.Pc))
 				p = appendp(p, AI32Eq)
 				p = appendp(p, ABrIf, constAddr(0))
@@ -487,25 +515,14 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 
 			if ret.To.Type == obj.TYPE_MEM {
-				// reset PC_B to function entry
+				// Set PC_B parameter to function entry.
 				p = appendp(p, AI32Const, constAddr(0))
-				p = appendp(p, ASet, regAddr(REG_PC_B))
 
 				// low-level WebAssembly call to function
 				p = appendp(p, ACall, ret.To)
 				p = appendp(p, AReturn)
 				break
 			}
-
-			// read return PC_F from Go stack
-			p = appendp(p, AGet, regAddr(REG_SP))
-			p = appendp(p, AI32Load16U, constAddr(2))
-			p = appendp(p, ASet, regAddr(REG_PC_F))
-
-			// read return PC_B from Go stack
-			p = appendp(p, AGet, regAddr(REG_SP))
-			p = appendp(p, AI32Load16U, constAddr(0))
-			p = appendp(p, ASet, regAddr(REG_PC_B))
 
 			// SP += 8
 			p = appendp(p, AGet, regAddr(REG_SP))
@@ -771,24 +788,60 @@ func countRegisters(s *obj.LSym) (numI, numF int16) {
 	return
 }
 
+// Most of the Go functions has a single parameter (PC_B) in
+// Wasm ABI. This is a list of exceptions.
+var notUsePC_B = map[string]bool{
+	"_rt0_wasm_js":           true,
+	"wasm_export_run":        true,
+	"wasm_export_resume":     true,
+	"wasm_export_getsp":      true,
+	"wasm_pc_f_loop":         true,
+	"runtime.wasmMove":       true,
+	"runtime.wasmZero":       true,
+	"runtime.wasmDiv":        true,
+	"runtime.wasmTruncS":     true,
+	"runtime.wasmTruncU":     true,
+	"runtime.gcWriteBarrier": true,
+	"cmpbody":                true,
+	"memeqbody":              true,
+	"memcmp":                 true,
+	"memchr":                 true,
+}
+
 func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	w := new(bytes.Buffer)
 
-	numI, numF := countRegisters(s)
+	hasLocalSP := false
+	hasPC_B := false
+	var r0, f0 int16
 
 	// Function starts with declaration of locals: numbers and types.
+	// Some functions use a special calling convention.
 	switch s.Name {
-	// memchr and memcmp don't use the normal Go calling convention and need i32 variables.
-	case "memchr":
-		writeUleb128(w, 1) // number of sets of locals
-		writeUleb128(w, 3) // number of locals
-		w.WriteByte(0x7F)  // i32
-	case "memcmp":
+	case "_rt0_wasm_js", "wasm_export_run", "wasm_export_resume", "wasm_export_getsp", "wasm_pc_f_loop",
+		"runtime.wasmMove", "runtime.wasmZero", "runtime.wasmDiv", "runtime.wasmTruncS", "runtime.wasmTruncU", "memeqbody":
+		writeUleb128(w, 0) // number of sets of locals
+	case "memchr", "memcmp":
 		writeUleb128(w, 1) // number of sets of locals
 		writeUleb128(w, 2) // number of locals
 		w.WriteByte(0x7F)  // i32
+	case "cmpbody":
+		writeUleb128(w, 1) // number of sets of locals
+		writeUleb128(w, 2) // number of locals
+		w.WriteByte(0x7E)  // i64
+	case "runtime.gcWriteBarrier":
+		writeUleb128(w, 1) // number of sets of locals
+		writeUleb128(w, 4) // number of locals
+		w.WriteByte(0x7E)  // i64
 	default:
-		numTypes := 0
+		// Normal calling convention: No WebAssembly parameters. First local variable is local SP cache.
+		hasLocalSP = true
+		hasPC_B = true
+		numI, numF := countRegisters(s)
+		r0 = 2
+		f0 = 2 + numI
+
+		numTypes := 1
 		if numI > 0 {
 			numTypes++
 		}
@@ -797,6 +850,8 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		}
 
 		writeUleb128(w, uint64(numTypes))
+		writeUleb128(w, 1) // number of locals (SP)
+		w.WriteByte(0x7F)  // i32
 		if numI > 0 {
 			writeUleb128(w, uint64(numI)) // number of locals
 			w.WriteByte(0x7E)             // i64
@@ -807,6 +862,11 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		}
 	}
 
+	if hasLocalSP {
+		// Copy SP from its global variable into a local variable. Accessing a local variable is more efficient.
+		updateLocalSP(w)
+	}
+
 	for p := s.Func.Text; p != nil; p = p.Link {
 		switch p.As {
 		case AGet:
@@ -815,15 +875,24 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 			reg := p.From.Reg
 			switch {
-			case reg >= REG_PC_F && reg <= REG_PAUSE:
+			case reg == REG_SP && hasLocalSP:
+				w.WriteByte(0x20)  // local.get
+				writeUleb128(w, 1) // local SP
+			case reg >= REG_SP && reg <= REG_PAUSE:
 				w.WriteByte(0x23) // global.get
-				writeUleb128(w, uint64(reg-REG_PC_F))
+				writeUleb128(w, uint64(reg-REG_SP))
+			case reg == REG_PC_B:
+				if !hasPC_B {
+					panic(fmt.Sprintf("PC_B is not used in %s", s.Name))
+				}
+				w.WriteByte(0x20)  // local.get (i32)
+				writeUleb128(w, 0) // local PC_B
 			case reg >= REG_R0 && reg <= REG_R15:
 				w.WriteByte(0x20) // local.get (i64)
-				writeUleb128(w, uint64(reg-REG_R0))
+				writeUleb128(w, uint64(r0+(reg-REG_R0)))
 			case reg >= REG_F0 && reg <= REG_F15:
 				w.WriteByte(0x20) // local.get (f64)
-				writeUleb128(w, uint64(numI+(reg-REG_F0)))
+				writeUleb128(w, uint64(f0+(reg-REG_F0)))
 			default:
 				panic("bad Get: invalid register")
 			}
@@ -835,20 +904,29 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 			reg := p.To.Reg
 			switch {
-			case reg >= REG_PC_F && reg <= REG_PAUSE:
+			case reg >= REG_SP && reg <= REG_PAUSE:
+				if reg == REG_SP && hasLocalSP {
+					w.WriteByte(0x22)  // local.tee
+					writeUleb128(w, 1) // local SP
+				}
 				w.WriteByte(0x24) // global.set
-				writeUleb128(w, uint64(reg-REG_PC_F))
-			case reg >= REG_R0 && reg <= REG_F15:
+				writeUleb128(w, uint64(reg-REG_SP))
+			case reg >= REG_R0 && reg <= REG_PC_B:
 				if p.Link.As == AGet && p.Link.From.Reg == reg {
 					w.WriteByte(0x22) // local.tee
 					p = p.Link
 				} else {
 					w.WriteByte(0x21) // local.set
 				}
-				if reg <= REG_R15 {
-					writeUleb128(w, uint64(reg-REG_R0))
+				if reg == REG_PC_B {
+					if !hasPC_B {
+						panic(fmt.Sprintf("PC_B is not used in %s", s.Name))
+					}
+					writeUleb128(w, 0) // local PC_B
+				} else if reg <= REG_R15 {
+					writeUleb128(w, uint64(r0+(reg-REG_R0)))
 				} else {
-					writeUleb128(w, uint64(numI+(reg-REG_F0)))
+					writeUleb128(w, uint64(f0+(reg-REG_F0)))
 				}
 			default:
 				panic("bad Set: invalid register")
@@ -861,12 +939,18 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 			reg := p.To.Reg
 			switch {
+			case reg == REG_PC_B:
+				if !hasPC_B {
+					panic(fmt.Sprintf("PC_B is not used in %s", s.Name))
+				}
+				w.WriteByte(0x22)  // local.tee (i32)
+				writeUleb128(w, 0) // local PC_B
 			case reg >= REG_R0 && reg <= REG_R15:
 				w.WriteByte(0x22) // local.tee (i64)
-				writeUleb128(w, uint64(reg-REG_R0))
+				writeUleb128(w, uint64(r0+(reg-REG_R0)))
 			case reg >= REG_F0 && reg <= REG_F15:
 				w.WriteByte(0x22) // local.tee (f64)
-				writeUleb128(w, uint64(numI+(reg-REG_F0)))
+				writeUleb128(w, uint64(f0+(reg-REG_F0)))
 			default:
 				panic("bad Tee: invalid register")
 			}
@@ -942,6 +1026,10 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 					r.Type = objabi.R_WASMIMPORT
 				}
 				r.Sym = p.To.Sym
+				if hasLocalSP {
+					// The stack may have moved, which changes SP. Update the local SP variable.
+					updateLocalSP(w)
+				}
 
 			default:
 				panic("bad type for Call")
@@ -950,6 +1038,10 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		case ACallIndirect:
 			writeUleb128(w, uint64(p.To.Offset))
 			w.WriteByte(0x00) // reserved value
+			if hasLocalSP {
+				// The stack may have moved, which changes SP. Update the local SP variable.
+				updateLocalSP(w)
+			}
 
 		case AI32Const, AI64Const:
 			if p.From.Name == obj.NAME_EXTERN {
@@ -999,6 +1091,13 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	w.WriteByte(0x0b) // end
 
 	s.P = w.Bytes()
+}
+
+func updateLocalSP(w *bytes.Buffer) {
+	w.WriteByte(0x23)  // global.get
+	writeUleb128(w, 0) // global SP
+	w.WriteByte(0x21)  // local.set
+	writeUleb128(w, 1) // local SP
 }
 
 func align(as obj.As) uint64 {
